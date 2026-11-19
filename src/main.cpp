@@ -622,10 +622,28 @@ void runStrategyPatternDemo()
 
 } // namespace
 
-int main()
+int main(int argc, char* argv[])
 {
+    std::string mode = (argc > 1) ? argv[1] : "all";
+
     try
     {
+        if (mode == "state")
+        {
+            runStatePatternDemo();
+            return 0;
+        }
+        if (mode == "observer")
+        {
+            runObserverPatternDemo();
+            return 0;
+        }
+        if (mode == "strategy")
+        {
+            runStrategyPatternDemo();
+            return 0;
+        }
+
         runRawSqliteDemo();
 
         runOrmDemo();

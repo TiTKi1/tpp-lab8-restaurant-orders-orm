@@ -3,5 +3,7 @@ build/
 run_output.txt
 report_build2/
 report_lab10/
+report_lab10_v2/
+screenshots/
 Zvit_*.docx
 ~$*.docx
