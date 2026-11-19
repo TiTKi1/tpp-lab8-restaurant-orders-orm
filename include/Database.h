@@ -6,6 +6,8 @@
 
 #include "RestaurantTable.h"
 #include "Order.h"
+#include "OrderStateHistory.h"
+#include "OrderEvent.h"
 
 // Створює ORM-сховище з відображенням RestaurantTable (1) -> Order (N).
 inline auto createStorage(const std::string& filename)
@@ -77,6 +79,21 @@ inline auto createStorage(const std::string& filename)
                 &Order::totalAmount
             ),
             make_column(
+                "itemsCount",
+                &Order::itemsCount,
+                default_value(0)
+            ),
+            make_column(
+                "urgencyLevel",
+                &Order::urgencyLevel,
+                default_value(0)
+            ),
+            make_column(
+                "waitTimeMinutes",
+                &Order::waitTimeMinutes,
+                default_value(0)
+            ),
+            make_column(
                 "orderedDate",
                 &Order::orderedDate,
                 not_null()
@@ -85,6 +102,69 @@ inline auto createStorage(const std::string& filename)
                 &Order::tableId
             ).references(
                 &RestaurantTable::id
+            )
+        ),
+
+        // Історія переходів станів замовлення (патерн State).
+        make_table(
+            "OrderStateHistory",
+            make_column(
+                "id",
+                &OrderStateHistory::id,
+                primary_key().autoincrement()
+            ),
+            make_column(
+                "orderId",
+                &OrderStateHistory::orderId
+            ),
+            make_column(
+                "fromState",
+                &OrderStateHistory::fromState,
+                not_null()
+            ),
+            make_column(
+                "toState",
+                &OrderStateHistory::toState,
+                not_null()
+            ),
+            make_column(
+                "changedDate",
+                &OrderStateHistory::changedDate,
+                not_null()
+            ),
+            foreign_key(
+                &OrderStateHistory::orderId
+            ).references(
+                &Order::id
+            )
+        ),
+
+        // Журнал подій замовлення (підписник патерну Observer).
+        make_table(
+            "OrderEvent",
+            make_column(
+                "id",
+                &OrderEvent::id,
+                primary_key().autoincrement()
+            ),
+            make_column(
+                "orderId",
+                &OrderEvent::orderId
+            ),
+            make_column(
+                "eventType",
+                &OrderEvent::eventType,
+                not_null()
+            ),
+            make_column(
+                "eventDate",
+                &OrderEvent::eventDate,
+                not_null()
+            ),
+            foreign_key(
+                &OrderEvent::orderId
+            ).references(
+                &Order::id
             )
         )
     );

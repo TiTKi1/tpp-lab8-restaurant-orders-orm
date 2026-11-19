@@ -1,12 +1,21 @@
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include <sqlite3.h>
 #include <sqlite_orm/sqlite_orm.h>
 
 #include "Database.h"
 #include "IRestaurantTableRepository.h"
+#include "KitchenQueueMonitor.h"
+#include "OrderJournal.h"
+#include "OrderSubject.h"
+#include "OrderWorkflow.h"
+#include "PriorityStrategy.h"
 #include "RawSqliteDemo.h"
 #include "SQLiteRestaurantTableRepository.h"
 #include "TestData.h"
@@ -74,8 +83,8 @@ void runRelationshipDemo()
     int tableId = storage.insert(table);
     std::cout << "RestaurantTable ID: " << tableId << '\n';
 
-    Order o1{0, tableId, "Салат Грецький",   "completed",   180.0, "2026-11-03"};
-    Order o2{0, tableId, "Чай трав'яний",    "completed",    60.0, "2026-11-03"};
+    Order o1{0, tableId, "Салат Грецький",   "completed",   180.0, 2, 1, 15, "2026-11-03"};
+    Order o2{0, tableId, "Чай трав'яний",    "completed",    60.0, 1, 1, 15, "2026-11-03"};
 
     int orderId1 = storage.insert(o1);
     int orderId2 = storage.insert(o2);
@@ -98,7 +107,7 @@ void runRelationshipDemo()
     // Перевірка посилальної цілісності: некоректний tableId повинен бути відхилений.
     try
     {
-        Order invalidOrder{0, -1, "Капучино", "new", 50.0, "2026-11-04"};
+        Order invalidOrder{0, -1, "Капучино", "new", 50.0, 1, 1, 0, "2026-11-04"};
         storage.insert(invalidOrder);
         std::cout << "Unexpected insertion success\n";
     }
@@ -347,6 +356,7 @@ void runTransactionDemo()
             "Крем-суп грибний",
             "new",
             0.0,
+            0, 0, 0,
             "2026-11-10"
         };
         storage.insert(order);
@@ -403,7 +413,7 @@ void runRollbackDemo()
             std::cout << "\nRestaurantTable inserted, ID: " << tableId << '\n';
 
             // Навмисно некоректний зовнішній ключ.
-            Order invalidOrder{0, -1, "Борщ", "new", 10.0, "2026-11-11"};
+            Order invalidOrder{0, -1, "Борщ", "new", 10.0, 1, 1, 0, "2026-11-11"};
             storage.insert(invalidOrder);
 
             return true;
@@ -458,7 +468,7 @@ void runWithoutTransactionDemo()
         int tableId = storage.insert(table);
         std::cout << "\nRestaurantTable inserted, ID: " << tableId << '\n';
 
-        Order invalidOrder{0, -1, "Борщ", "new", 10.0, "2026-11-11"};
+        Order invalidOrder{0, -1, "Борщ", "new", 10.0, 1, 1, 0, "2026-11-11"};
         storage.insert(invalidOrder);
     }
     catch (const std::exception& ex)
@@ -469,6 +479,145 @@ void runWithoutTransactionDemo()
     std::cout << "\nAfter operations:\n";
     std::cout << "RestaurantTable: " << storage.count<RestaurantTable>() << '\n';
     std::cout << "Order: " << storage.count<Order>() << '\n';
+}
+
+// 10. Патерн State: життєвий цикл замовлення created -> accepted -> completed,
+// окремий термінальний стан cancelled, перевірка недопустимих переходів,
+// історія переходів зберігається у таблиці OrderStateHistory.
+void runStatePatternDemo()
+{
+    using namespace sqlite_orm;
+
+    auto storage = createStorage("restaurant_orders_patterns.db");
+    storage.on_open = [](sqlite3* db)
+    {
+        sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nullptr, nullptr, nullptr);
+    };
+    storage.open_forever();
+    storage.sync_schema();
+
+    std::cout << "\n=== STATE PATTERN DEMONSTRATION ===\n";
+
+    RestaurantTable table{0, 30, 4, "зала", "зайнятий", "2026-11-15"};
+    int tableId = storage.insert(table);
+
+    OrderSubject subject;
+
+    Order order{0, tableId, "Борщ, вареники", "created", 0.0, 2, 3, 0, "2026-11-15"};
+    auto workflow = OrderWorkflow::createNew(order, storage, subject);
+    std::cout << "Order #" << workflow.order().id
+               << " created, state: " << workflow.currentStateName() << '\n';
+
+    workflow.accept();
+    std::cout << "After accept(), state: " << workflow.currentStateName() << '\n';
+
+    workflow.complete();
+    std::cout << "After complete(), state: " << workflow.currentStateName() << '\n';
+
+    try
+    {
+        workflow.accept();
+        std::cout << "Unexpected: transition succeeded\n";
+    }
+    catch (const std::exception& ex)
+    {
+        std::cout << "Rejected invalid transition: " << ex.what() << '\n';
+    }
+
+    auto history = storage.get_all<OrderStateHistory>(
+        where(c(&OrderStateHistory::orderId) == workflow.order().id),
+        order_by(&OrderStateHistory::id)
+    );
+
+    std::cout << "\nState transition history for order #" << workflow.order().id << ":\n";
+    for (const auto& record : history)
+    {
+        std::cout << "  " << record.fromState << " -> " << record.toState
+                   << " (" << record.changedDate << ")\n";
+    }
+}
+
+// 11. Патерн Observer: сповіщення підписників (монітор черги кухні,
+// журнал замовлень) про створення та завершення замовлення.
+// Демонструється коректне відписування через std::weak_ptr/RAII.
+void runObserverPatternDemo()
+{
+    auto storage = createStorage("restaurant_orders_patterns.db");
+    storage.sync_schema();
+
+    std::cout << "\n=== OBSERVER PATTERN DEMONSTRATION ===\n";
+
+    OrderSubject subject;
+
+    auto kitchenMonitor = std::make_shared<KitchenQueueMonitor>();
+    auto journal = std::make_shared<OrderJournal>(storage);
+
+    subject.subscribe(kitchenMonitor);
+    subject.subscribe(journal);
+    std::cout << "Active subscribers: " << subject.activeSubscriberCount() << '\n';
+
+    RestaurantTable table{0, 31, 2, "тераса", "зайнятий", "2026-11-16"};
+    int tableId = storage.insert(table);
+
+    Order order{0, tableId, "Лимонад, брускета", "created", 0.0, 2, 2, 0, "2026-11-16"};
+    auto workflow = OrderWorkflow::createNew(order, storage, subject);
+
+    workflow.accept();
+    workflow.complete();
+
+    // Знищуємо підписника (журнал) до того, як станеться наступна подія:
+    // суб'єкт має коректно пропустити його під час розсилки.
+    journal.reset();
+    std::cout << "\nJournal subscriber released. Active subscribers: "
+               << subject.activeSubscriberCount() << '\n';
+
+    Order secondOrder{0, tableId, "Чай, тірамісу", "created", 0.0, 2, 1, 0, "2026-11-16"};
+    auto secondWorkflow = OrderWorkflow::createNew(secondOrder, storage, subject);
+    secondWorkflow.accept();
+    secondWorkflow.complete();
+}
+
+// 12. Патерн Strategy: обчислення пріоритету замовлень трьома алгоритмами
+// та можливість зміни алгоритму під час виконання програми.
+void runStrategyPatternDemo()
+{
+    std::cout << "\n=== STRATEGY PATTERN DEMONSTRATION ===\n";
+
+    std::vector<Order> pendingOrders = {
+        {1, 1, "Стейк, гарнір",      "accepted", 0.0, 3, 4, 40, "2026-11-16"},
+        {2, 2, "Капучино",           "accepted", 0.0, 1, 1,  5, "2026-11-16"},
+        {3, 3, "Суші-сет, рол",      "accepted", 0.0, 6, 3, 25, "2026-11-16"},
+        {4, 4, "Салат, суп",         "accepted", 0.0, 2, 5, 55, "2026-11-16"},
+    };
+
+    PriorityCalculator calculator(std::make_unique<MaxNormalizedParamStrategy>());
+
+    std::vector<std::unique_ptr<IPriorityStrategy>> strategies;
+    strategies.push_back(std::make_unique<MaxNormalizedParamStrategy>());
+    strategies.push_back(std::make_unique<ProtectedSumStrategy>());
+    strategies.push_back(std::make_unique<NormalizedRemainderStrategy>());
+
+    for (auto& strategy : strategies)
+    {
+        calculator.setStrategy(std::move(strategy));
+        std::cout << "\nStrategy: " << calculator.strategyName() << '\n';
+
+        std::vector<std::pair<int, double>> ranked;
+        for (const auto& order : pendingOrders)
+        {
+            ranked.emplace_back(order.id, calculator.calculate(order));
+        }
+
+        std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b)
+        {
+            return a.second > b.second;
+        });
+
+        for (const auto& [orderId, priority] : ranked)
+        {
+            std::cout << "  Order #" << orderId << " | priority: " << priority << '\n';
+        }
+    }
 }
 
 } // namespace
@@ -491,6 +640,10 @@ int main()
         runTransactionDemo();
         runRollbackDemo();
         runWithoutTransactionDemo();
+
+        runStatePatternDemo();
+        runObserverPatternDemo();
+        runStrategyPatternDemo();
     }
     catch (const std::exception& ex)
     {

@@ -1,3 +1,7 @@
 build/
 *.db
 run_output.txt
+report_build2/
+report_lab10/
+Zvit_*.docx
+~$*.docx

@@ -14,6 +14,12 @@ add_executable(RestaurantOrdersORM
     src/RawSqliteDemo.cpp
     src/SQLiteRestaurantTableRepository.cpp
     src/TestData.cpp
+    src/OrderState.cpp
+    src/OrderWorkflow.cpp
+    src/OrderSubject.cpp
+    src/KitchenQueueMonitor.cpp
+    src/OrderJournal.cpp
+    src/PriorityStrategy.cpp
 )
 
 target_include_directories(RestaurantOrdersORM
